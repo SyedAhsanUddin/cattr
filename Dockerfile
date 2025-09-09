@@ -1,10 +1,15 @@
 FROM amazingcat/cattr:latest
 
-# Remove MySQL startup script if present
+# Try to stop bundled MySQL; not critical if it still logs
 RUN rm -f /etc/supervisor/conf.d/mysql.conf || true
 
-# Copy our .env into the app
+# Keep your .env copy (fine to keep; env vars will still override)
 COPY .env /var/www/html/.env
 
-# Expose Cattr’s Laravel web app only (no MySQL)
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=10000"]
+# Add our start script
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
+
+# Use our startup (runs migrate/seed, then serves)
+CMD ["/usr/local/bin/start.sh"]
+

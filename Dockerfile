@@ -1,15 +1,15 @@
+# Use the official Cattr image as a base
 FROM amazingcat/cattr:latest
 
-# Try to stop bundled MySQL; not critical if it still logs
-RUN rm -f /etc/supervisor/conf.d/mysql.conf || true
+# Kill any inherited entrypoint that starts the built-in MySQL
+ENTRYPOINT []
 
-# Keep your .env copy (fine to keep; env vars will still override)
-COPY .env /var/www/html/.env
+# Best-effort: remove supervisor configs that may start MySQL
+RUN rm -f /etc/supervisor/conf.d/*mysql*.conf || true
 
-# Add our start script
+# Add our startup script
 COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh
 
-# Use our startup (runs migrate/seed, then serves)
+# Start only Laravel (our script finds artisan, runs migrations, then serves)
 CMD ["/usr/local/bin/start.sh"]
-

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -e
 
 # --- find the Laravel app automatically ---
@@ -14,7 +14,6 @@ cd "$APP_DIR"
 if [ -f /etc/secrets/.env ]; then
   cp /etc/secrets/.env "$APP_DIR/.env"
 else
-  # Build a minimal .env from environment variables
   cat > "$APP_DIR/.env" <<EOF
 APP_NAME=Cattr
 APP_ENV=production
@@ -28,21 +27,20 @@ DB_DATABASE=${DB_DATABASE:-cattr}
 DB_USERNAME=${DB_USERNAME:?set DB_USERNAME env var}
 DB_PASSWORD=${DB_PASSWORD:?set DB_PASSWORD env var}
 
-# TiDB SSL (safe defaults)
 DB_SSL_CA=/etc/ssl/certs/ca-certificates.crt
 DB_SSL_MODE=VERIFY_IDENTITY
 EOF
 fi
 
-# --- clear caches so Laravel definitely reads our DB settings ---
+# --- clear caches so Laravel reads the latest env ---
 php artisan config:clear || true
 php artisan cache:clear  || true
 php artisan route:clear  || true
 php artisan view:clear   || true
 
-# --- run migrations + seed against TiDB ---
+# --- create schema + seed on TiDB ---
 php artisan migrate --force || true
 php artisan db:seed --force || true
 
-# --- run the app (Render provides $PORT) ---
+# --- run the app (Render sets $PORT) ---
 php artisan serve --host=0.0.0.0 --port="${PORT:-10000}"

@@ -106,31 +106,35 @@ if [ -d "$MIGRATIONS_DIR" ]; then
       mv "$TARGET_FILE" "$TARGET_FILE.skipped"
     fi
   done
-  echo "✅ Migration skipping complete."
 fi
 
 # --- 4b. Replace TiDB-incompatible view migration with a compatible one ---
-VIEW_MIG_ORIG="$MIGRATIONS_DIR/2019_03_26_113406_add_user_last_time_usage_view.php"
-if [ -f "$VIEW_MIG_ORIG" ]; then
-  echo "Replacing TiDB-incompatible view migration with a compatible one..."
-  mv "$VIEW_MIG_ORIG" "$VIEW_MIG_ORIG.skipped"
+# Find any migration that creates the 'user_time_activity' view (by name or content) and disable it.
+FOUND_VIEW_MIGS="$( (find "$MIGRATIONS_DIR" -type f -name "*add_user_last_time_usage_view*.php" ; \
+                      grep -rilE 'CREATE[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?' "$MIGRATIONS_DIR") | sort -u )"
+if [ -n "$FOUND_VIEW_MIGS" ]; then
+  echo "Replacing TiDB-incompatible user_time_activity view migration(s)..."
+  echo "$FOUND_VIEW_MIGS" | while read -r f; do
+    [ -f "$f" ] || continue
+    echo "  -> Skipping $f"
+    mv "$f" "$f.skipped"
+  done
 
-  # Create a new migration that builds the same view without subqueries in ON
-  VIEW_MIG_NEW="$MIGRATIONS_DIR/2019_03_26_113407_add_user_last_time_usage_view_tidb.php"
+  # Add a TiDB-friendly migration with a newer timestamp so it runs after earlier ones.
+  TS="$(date +%Y_%m_%d_%H%M%S)"
+  VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
   cat > "$VIEW_MIG_NEW" <<'PHP'
 <?php
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Migrations\Migration;
-
-class AddUserLastTimeUsageViewTidb extends Migration
-{
-    public function up()
+return new class extends Migration {
+    public function up(): void
     {
-        // Ensure idempotency if re-running
+        // Idempotent: drop then create
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
 
-        // TiDB-friendly: use GROUP BY + JOIN instead of subquery in ON()
+        // TiDB-friendly: join to a MAX() per user instead of a subquery in ON()
         DB::statement(<<<'SQL'
 CREATE VIEW user_time_activity AS
 SELECT
@@ -150,12 +154,15 @@ SQL
         );
     }
 
-    public function down()
+    public function down(): void
     {
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
     }
-}
+};
 PHP
+  echo "  -> Added $VIEW_MIG_NEW"
+else
+  echo "No user_time_activity view migration found to replace."
 fi
 
 # --- 5. Prepare and Launch Application ---

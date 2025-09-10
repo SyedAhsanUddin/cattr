@@ -103,7 +103,18 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   echo "✅ Incompatible migrations disabled."
 fi
 
-# --- 5. Prepare and Launch Application ---
+# --- 5. Apply Application-Level Patches ---
+# Fix for "Class 'App\Models\Rule' not found" error in a specific migration
+RULE_MIGRATION_FILE="$MIGRATIONS_DIR/2018_09_27_100017_update_rules.php"
+if [ -f "$RULE_MIGRATION_FILE" ]; then
+    echo "Patching incorrect namespace in $RULE_MIGRATION_FILE..."
+    # Replace the incorrect 'App\Models\Rule' with the correct 'App\Rule'
+    sed -i 's/App\\Models\\Rule/App\\Rule/g' "$RULE_MIGRATION_FILE"
+    echo "✅ Patch applied."
+fi
+
+
+# --- 6. Prepare and Launch Application ---
 echo "Clearing caches..."
 php artisan config:clear
 php artisan route:clear

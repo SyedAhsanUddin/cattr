@@ -69,7 +69,7 @@ if [ -f "$DBCFG" ] && ! grep -q "PDO::MYSQL_ATTR_SSL_CA" "$DBCFG"; then
   echo "✅ TLS configured."
 fi
 
-# --- 4a. Skip Incompatible & Obsolete Migrations ---
+# --- 4. Patch and Skip Migrations ---
 MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
   echo "Scanning for incompatible and obsolete migrations..."
@@ -106,24 +106,39 @@ if [ -d "$MIGRATIONS_DIR" ]; then
       mv "$TARGET_FILE" "$TARGET_FILE.skipped"
     fi
   done
-fi
 
-# --- 4b. Replace TiDB-incompatible view migration with a compatible one ---
-# Find any migration that creates the 'user_time_activity' view (by name or content) and disable it.
-FOUND_VIEW_MIGS="$( (find "$MIGRATIONS_DIR" -type f -name "*add_user_last_time_usage_view*.php" ; \
-                      grep -rilE 'CREATE[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?' "$MIGRATIONS_DIR") | sort -u )"
-if [ -n "$FOUND_VIEW_MIGS" ]; then
-  echo "Replacing TiDB-incompatible user_time_activity view migration(s)..."
-  echo "$FOUND_VIEW_MIGS" | while read -r f; do
-    [ -f "$f" ] || continue
-    echo "  -> Skipping $f"
-    mv "$f" "$f.skipped"
-  done
+  # Rule 4: Robustly find and replace the TiDB-incompatible view migration
+  echo "Searching for user_time_activity view migration..."
+  # Show what we have for debugging
+  ls -la "$MIGRATIONS_DIR" | sed -n '1,120p'
+  # Candidate files by name (broad patterns) + by content (handles CREATE or CREATE OR REPLACE)
+  FOUND_VIEW_MIGS="$(
+    {
+      find "$MIGRATIONS_DIR" -type f \( \
+          -iname "*user_time_activity*.php" -o \
+          -iname "*user*last*time*usage*view*.php" -o \
+          -iname "*113406*add_user_last_time_usage*view*.php" -o \
+          -iname "2019_03_26_113406_add_user_last_time_usage_view.php" \
+        \) -not -name '*.skipped' -not -name '*_tidb.php' 2>/dev/null
+      grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?' "$MIGRATIONS_DIR" 2>/dev/null | grep -vE '\.skipped$|\_tidb\.php$'
+    } | sort -u
+  )"
+  # Final safety: the exact file name seen in logs
+  EXACT_PATH="$MIGRATIONS_DIR/2019_03_26_113406_add_user_last_time_usage_view.php"
+  [ -f "$EXACT_PATH" ] && FOUND_VIEW_MIGS="$(printf "%s\n%s\n" "$FOUND_VIEW_MIGS" "$EXACT_PATH" | sort -u)"
 
-  # Add a TiDB-friendly migration with a newer timestamp so it runs after earlier ones.
-  TS="$(date +%Y_%m_%d_%H%M%S)"
-  VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
-  cat > "$VIEW_MIG_NEW" <<'PHP'
+  if [ -n "$FOUND_VIEW_MIGS" ]; then
+    echo "Replacing TiDB-incompatible user_time_activity view migration(s):"
+    echo "$FOUND_VIEW_MIGS" | while read -r f; do
+      [ -f "$f" ] || continue
+      echo "  -> Skipping $f"
+      mv "$f" "$f.skipped"
+    done
+
+    # Add a TiDB-friendly migration with a new timestamp so it runs in order
+    TS="$(date +%Y_%m_%d_%H%M%S)"
+    VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
+    cat > "$VIEW_MIG_NEW" <<'PHP'
 <?php
 
 use Illuminate\Support\Facades\DB;
@@ -131,7 +146,6 @@ use Illuminate\Database\Migrations\Migration;
 return new class extends Migration {
     public function up(): void
     {
-        // Idempotent: drop then create
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
 
         // TiDB-friendly: join to a MAX() per user instead of a subquery in ON()
@@ -160,9 +174,10 @@ SQL
     }
 };
 PHP
-  echo "  -> Added $VIEW_MIG_NEW"
-else
-  echo "No user_time_activity view migration found to replace."
+    echo "  -> Added $VIEW_MIG_NEW"
+  else
+    echo "Still didn’t find the view migration. Will proceed and let migrate show the failing path."
+  fi
 fi
 
 # --- 5. Prepare and Launch Application ---

@@ -107,7 +107,6 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   OBSOLETE_MIGRATIONS="
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
-  2020_01_14_061358_fixes_for_roles.php
   "
   echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
@@ -152,34 +151,18 @@ if [ -n "$ALL_VIEW_MIGS" ]; then
   VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
   cat > "$VIEW_MIG_NEW" <<'PHP'
 <?php
-
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Migrations\Migration;
-
 class AddUserLastTimeUsageViewTidb extends Migration
 {
     public function up()
     {
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
         DB::statement(<<<'SQL'
-CREATE VIEW user_time_activity AS
-SELECT
-    ti.id AS time_interval_id,
-    ti.user_id,
-    ti.task_id,
-    ti.end_at AS last_time_activity
-FROM time_intervals ti
-JOIN (
-    SELECT user_id, MAX(end_at) AS max_end_at
-    FROM time_intervals
-    GROUP BY user_id
-) tmax
-    ON ti.user_id = tmax.user_id
-   AND ti.end_at = tmax.max_end_at
+CREATE VIEW user_time_activity AS SELECT ti.id AS time_interval_id, ti.user_id, ti.task_id, ti.end_at AS last_time_activity FROM time_intervals ti JOIN (SELECT user_id, MAX(end_at) AS max_end_at FROM time_intervals GROUP BY user_id) tmax ON ti.user_id = tmax.user_id AND ti.end_at = tmax.max_end_at
 SQL
         );
     }
-
     public function down()
     {
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
@@ -236,52 +219,61 @@ class Rule extends Role {}
 PHP
 fi
 
-# Rule 6: Create early compat migration to add role.role_id (+ soft deletes)
+# Rule 6: Create early compat migrations to fix legacy schema issues
 TS_FIX="2020_01_20_000000"
 COMPAT_MIG="$MIGRATIONS_DIR/${TS_FIX}_add_role_roleid_and_softdeletes_compat.php"
 if [ ! -f "$COMPAT_MIG" ]; then
   cat > "$COMPAT_MIG" <<'PHP'
 <?php
-
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-
 class AddRoleRoleidAndSoftdeletesCompat extends Migration
 {
     public function up()
     {
         if (Schema::hasTable('role')) {
             Schema::table('role', function (Blueprint $table) {
-                if (!Schema::hasColumn('role', 'role_id')) {
-                    $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx');
-                }
-                if (!Schema::hasColumn('role', 'deleted_at')) {
-                    $table->softDeletes();
-                }
+                if (!Schema::hasColumn('role', 'role_id')) { $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx'); }
+                if (!Schema::hasColumn('role', 'deleted_at')) { $table->softDeletes(); }
             });
             DB::statement("UPDATE `role` SET `role_id` = `id` WHERE `role_id` IS NULL");
         }
     }
-
-    public function down()
-    {
-        if (Schema::hasTable('role')) {
-            Schema::table('role', function (Blueprint $table) {
-                if (Schema::hasColumn('role', 'role_id')) {
-                    $table->dropIndex('role_role_id_idx');
-                    $table->dropColumn('role_id');
-                }
-                if (Schema::hasColumn('role', 'deleted_at')) {
-                    $table->dropSoftDeletes();
-                }
-            });
-        }
-    }
+    public function down() { /* Down migration is intentionally left empty */ }
 }
 PHP
   echo "  -> Added compat migration: $COMPAT_MIG"
+fi
+
+TS_FIX2="2020_01_25_000000"
+COMPAT_MIG2="$MIGRATIONS_DIR/${TS_FIX2}_add_role_object_action_and_seed_compat.php"
+if [ ! -f "$COMPAT_MIG2" ]; then
+  cat > "$COMPAT_MIG2" <<'PHP'
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+class AddRoleObjectActionAndSeedCompat extends Migration
+{
+    public function up()
+    {
+        if (!Schema::hasTable('role')) return;
+        Schema::table('role', function (Blueprint $table) {
+            if (!Schema::hasColumn('role', 'object')) { $table->string('object')->nullable()->index('role_object_idx'); }
+            if (!Schema::hasColumn('role', 'action')) { $table->string('action')->nullable()->index('role_action_idx'); }
+        });
+        $exists = DB::table('role')->whereNull('deleted_at')->where('role_id', 2)->where('object', 'time-intervals')->where('action', 'bulk-edit')->exists();
+        if (!$exists) {
+            DB::table('role')->insert(['role_id' => 2, 'object' => 'time-intervals', 'action' => 'bulk-edit']);
+        }
+    }
+    public function down() { /* Down migration is intentionally left empty */ }
+}
+PHP
+  echo "  -> Added compat migration: $COMPAT_MIG2"
 fi
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes

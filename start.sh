@@ -79,7 +79,7 @@ MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
   echo "Scanning for incompatible and obsolete migrations..."
 
-  # Find and disable migrations that use CREATE/DROP TRIGGER
+  # Rule 1: Skip migrations that use database triggers
   TRIGGER_MIGS="$(grep -rilE 'CREATE[[:space:]]+TRIGGER|DROP[[:space:]]+TRIGGER' "$MIGRATIONS_DIR" || true)"
   if [ -n "$TRIGGER_MIGS" ]; then
     echo "Disabling TiDB-incompatible trigger migrations:"
@@ -90,19 +90,27 @@ if [ -d "$MIGRATIONS_DIR" ]; then
     done
   fi
 
-  # Find and disable the known problematic 'add_index' migrations
+  # Rule 2: Skip migrations with known duplicate indexes
   for f in "$MIGRATIONS_DIR"/*add_index*.php; do
     [ -f "$f" ] || continue
     echo "Disabling known duplicate-index migration: $f"
     mv "$f" "$f.skipped"
   done
   
-  # Disable specific obsolete migration that fails due to a missing Model class
-  OBSOLETE_MIGRATION="$MIGRATIONS_DIR/2018_09_27_100017_update_rules.php"
-  if [ -f "$OBSOLETE_MIGRATION" ]; then
-    echo "Disabling obsolete migration with missing class: $OBSOLETE_MIGRATION"
-    mv "$OBSOLETE_MIGRATION" "$OBSOLETE_MIGRATION.skipped"
-  fi
+  # Rule 3: Skip a list of specific obsolete migrations that fail due to missing classes
+  OBSOLETE_MIGRATIONS="
+  2018_09_27_100017_update_rules.php
+  2018_11_02_121027_create_registrations_table.php
+  "
+  echo "Disabling obsolete migrations with missing classes:"
+  echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
+    [ -z "$migration_file" ] && continue
+    TARGET_FILE="$MIGRATIONS_DIR/$migration_file"
+    if [ -f "$TARGET_FILE" ]; then
+      echo "  -> Skipping $TARGET_FILE"
+      mv "$TARGET_FILE" "$TARGET_FILE.skipped"
+    fi
+  done
   
   echo "✅ Migration skipping complete."
 fi

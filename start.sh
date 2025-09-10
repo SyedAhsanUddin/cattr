@@ -48,6 +48,12 @@ fi
 # Ensure the file has Unix line endings
 sed -i 's/\r$//' "$APP_DIR/.env" || true
 
+# --- 2b. Generate App Key If Missing ---
+if [ -z "${APP_KEY:-}" ] || ! grep -q '^APP_KEY=' "$APP_DIR/.env"; then
+  echo "Generating APP_KEY..."
+  php artisan key:generate --force
+fi
+
 # --- 3. Enforce TLS for Database Connection ---
 # Modify Laravel's database config to use the SSL CA certificate.
 DBCFG="$APP_DIR/config/database.php"
@@ -74,30 +80,28 @@ MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
   echo "Scanning for incompatible and obsolete migrations..."
 
-  # Rule 1: Skip migrations that use database triggers (with hardened grep pipeline)
-  echo "Disabling TiDB-incompatible trigger migrations..."
+  # Rule 1: Skip migrations that use database triggers
   { grep -rilE 'CREATE[[:space:]]+TRIGGER|DROP[[:space:]]+TRIGGER' "$MIGRATIONS_DIR" 2>/dev/null || true; } \
   | grep -v '\.skipped$' \
   | while read -r f; do
       [ -f "$f" ] || continue
-      echo "  -> Skipping $f"
+      echo "  -> Disabling trigger migration: $f"
       mv "$f" "$f.skipped"
     done
 
-  # Rule 2: Skip migrations with known duplicate indexes (with hardened find command)
-  echo "Disabling known duplicate-index migrations..."
+  # Rule 2: Skip migrations with known duplicate indexes
   find "$MIGRATIONS_DIR" -type f -name '*add_index*.php' ! -name '*.skipped' \
   | while read -r f; do
-      echo "  -> Skipping $f"
+      echo "  -> Disabling duplicate-index migration: $f"
       mv "$f" "$f.skipped"
     done
   
-  # Rule 3: Skip a list of specific obsolete migrations that fail due to missing classes
+  # Rule 3: Skip a list of specific obsolete migrations
   OBSOLETE_MIGRATIONS="
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
   "
-  echo "Disabling obsolete migrations with missing classes..."
+  echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
     [ -z "$migration_file" ] && continue
     TARGET_FILE="$MIGRATIONS_DIR/$migration_file"
@@ -108,33 +112,30 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   done
 fi
 
-# Rule 4: Find & replace the TiDB-incompatible *user_time_activity* view migration ANYWHERE in the app
+# Rule 4: Find & replace the TiDB-incompatible view migration ANYWHERE in the app
 echo "Scanning project for user_time_activity view migrations (any path)..."
 ALL_VIEW_MIGS="$(
   {
-    find "$APP_DIR" -type f -name '*.php' \( \
+    find "$APP_DIR" -path "$APP_DIR/vendor" -prune -o -path "$APP_DIR/storage" -prune -o -type f -name '*.php' \( \
       -iname '*user_time_activity*.php' -o \
       -iname '*user*last*time*usage*view*.php' -o \
       -iname '2019_03_26_113406_add_user_last_time_usage_view.php' \
-    \) 2>/dev/null
-    grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true
-    grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true
+    \) -print 2>/dev/null
+    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
+    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
   } | sort -u
 )"
-
 ALL_VIEW_MIGS="$(printf "%s\n" "$ALL_VIEW_MIGS" | grep -vE '\.skipped$|_tidb\.php$' || true)"
 
 if [ -n "$ALL_VIEW_MIGS" ]; then
-  echo "Found potential offenders:"
-  printf '%s\n' "$ALL_VIEW_MIGS" | sed 's/^/  - /'
-  echo "Disabling/patching offending migrations..."
+  echo "Found and disabling incompatible view migration(s):"
   printf '%s\n' "$ALL_VIEW_MIGS" | while read -r f; do
     [ -f "$f" ] || continue
     if echo "$f" | grep -q '/database/'; then
-      echo "  -> Renaming $f to $f.skipped"
+      echo "  -> Skipping $f"
       mv "$f" "$f.skipped"
-    elif grep -E 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?' "$f" >/dev/null 2>&1; then
-      echo "  -> Renaming $f to $f.skipped (contains CREATE VIEW user_time_activity)"
+    elif grep -Eq 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?' "$f"; then
+      echo "  -> Skipping $f (contains CREATE VIEW)"
       mv "$f" "$f.skipped"
     fi
   done
@@ -153,17 +154,42 @@ CREATE VIEW user_time_activity AS SELECT ti.id AS time_interval_id, ti.user_id, 
 SQL
         );
     }
-    public function down(): void {
-        DB::statement('DROP VIEW IF EXISTS user_time_activity');
-    }
+    public function down(): void { DB::statement('DROP VIEW IF EXISTS user_time_activity'); }
 };
 PHP
-  echo "  -> Added $VIEW_MIG_NEW"
-else
-  echo "No user_time_activity offenders found anywhere; proceeding."
+  echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
+# Rule 5: Fix bad model reference in migrations (Rule -> Role) and add a fallback shim.
+echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
+{ grep -ril --include='*.php' 'App\\Models\\Rule' "$APP_DIR" 2>/dev/null || true; } \
+  | grep -v '/vendor/' | grep -v '/storage/' \
+  | grep -vE '\.skipped$' \
+  | while read -r f; do
+      echo "  -> Fixing typo in $f"
+      sed -i 's#App\\Models\\Rule#App\\Models\\Role#g' "$f"
+    done
+
+if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
+  echo "Creating minimal App\\Models\\Role model (not found)..."
+  mkdir -p "$APP_DIR/app/Models"
+  cat > "$APP_DIR/app/Models/Role.php" <<'PHP'
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Model;
+class Role extends Model { protected $guarded = []; public $timestamps = false; }
+PHP
+fi
+
+# Ensure new Role model is autoloaded by Composer
+if command -v composer >/dev/null 2>&1; then
+  echo "Refreshing Composer autoloader..."
+  composer dump-autoload -o || true
+fi
+
+
 # --- 5. Prepare and Launch Application ---
+: "${PORT:=10000}"
 echo "Clearing caches..."
 php artisan config:clear
 php artisan route:clear
@@ -177,6 +203,11 @@ if [ "${RESET_DB:-0}" = "1" ]; then
 else
   echo "RESET_DB is not 1. Running incremental migrations..."
   php artisan migrate --force
+  # Optionally run seeders on incremental deploys if flag is set
+  if [ "${RUN_SEED:-0}" = "1" ]; then
+    echo "RUN_SEED=1 found. Running database seeder..."
+    php artisan db:seed --force
+  fi
 fi
 
 echo "🚀 Starting Cattr application server..."

@@ -74,47 +74,40 @@ if [ -f "$DBCFG" ] && ! grep -q "PDO::MYSQL_ATTR_SSL_CA" "$DBCFG"; then
   echo "✅ TLS configured."
 fi
 
-# --- 4. Skip Incompatible Migrations for TiDB ---
-# TiDB Serverless does not support TRIGGERS, and one migration has a duplicate index.
-# We find these migration files and rename them so Laravel's migrator skips them.
+# --- 4. Skip Incompatible & Obsolete Migrations ---
 MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
-  echo "Scanning for incompatible migrations..."
+  echo "Scanning for incompatible and obsolete migrations..."
 
   # Find and disable migrations that use CREATE/DROP TRIGGER
-  # BusyBox grep uses -r, not -R for recursion.
   TRIGGER_MIGS="$(grep -rilE 'CREATE[[:space:]]+TRIGGER|DROP[[:space:]]+TRIGGER' "$MIGRATIONS_DIR" || true)"
   if [ -n "$TRIGGER_MIGS" ]; then
     echo "Disabling TiDB-incompatible trigger migrations:"
     echo "$TRIGGER_MIGS" | while read -r f; do
       [ -f "$f" ] || continue
       echo "  -> Skipping $f"
-      mv "$f" "$f.tidb-skipped"
+      mv "$f" "$f.skipped"
     done
   fi
 
-  # Find and disable the known problematic 'add_index' migration
+  # Find and disable the known problematic 'add_index' migrations
   for f in "$MIGRATIONS_DIR"/*add_index*.php; do
     [ -f "$f" ] || continue
-    echo "Disabling known duplicate-index migration:"
-    echo "  -> Skipping $f"
-    mv "$f" "$f.tidb-skipped"
+    echo "Disabling known duplicate-index migration: $f"
+    mv "$f" "$f.skipped"
   done
-  echo "✅ Incompatible migrations disabled."
+  
+  # Disable specific obsolete migration that fails due to a missing Model class
+  OBSOLETE_MIGRATION="$MIGRATIONS_DIR/2018_09_27_100017_update_rules.php"
+  if [ -f "$OBSOLETE_MIGRATION" ]; then
+    echo "Disabling obsolete migration with missing class: $OBSOLETE_MIGRATION"
+    mv "$OBSOLETE_MIGRATION" "$OBSOLETE_MIGRATION.skipped"
+  fi
+  
+  echo "✅ Migration skipping complete."
 fi
 
-# --- 5. Apply Application-Level Patches ---
-# Fix for "Class 'App\Models\Rule' not found" error in a specific migration
-RULE_MIGRATION_FILE="$MIGRATIONS_DIR/2018_09_27_100017_update_rules.php"
-if [ -f "$RULE_MIGRATION_FILE" ]; then
-    echo "Patching incorrect namespace in $RULE_MIGRATION_FILE..."
-    # Replace the incorrect 'App\Models\Rule' with the correct 'App\Rule'
-    sed -i 's/App\\Models\\Rule/App\\Rule/g' "$RULE_MIGRATION_FILE"
-    echo "✅ Patch applied."
-fi
-
-
-# --- 6. Prepare and Launch Application ---
+# --- 5. Prepare and Launch Application ---
 echo "Clearing caches..."
 php artisan config:clear
 php artisan route:clear

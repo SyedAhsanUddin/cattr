@@ -172,7 +172,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+# Rule 5: Fix bad model reference in migrations (Rule -> Role) and add shims
 echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
 { grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
   | grep -v '/vendor/' | grep -v '/storage/' \
@@ -219,61 +219,45 @@ class Rule extends Role {}
 PHP
 fi
 
-# Rule 6: Create early compat migrations to fix legacy schema issues
-TS_FIX="2020_01_20_000000"
-COMPAT_MIG="$MIGRATIONS_DIR/${TS_FIX}_add_role_roleid_and_softdeletes_compat.php"
-if [ ! -f "$COMPAT_MIG" ]; then
-  cat > "$COMPAT_MIG" <<'PHP'
+# Rule 6: Bootstrap role table BEFORE legacy role migrations run
+TS_BOOT="2020_01_05_000000"
+BOOT_MIG="$MIGRATIONS_DIR/${TS_BOOT}_bootstrap_roles_table_compat.php"
+if [ ! -f "$BOOT_MIG" ]; then
+  cat > "$BOOT_MIG" <<'PHP'
 <?php
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-class AddRoleRoleidAndSoftdeletesCompat extends Migration
-{
-    public function up()
-    {
-        if (Schema::hasTable('role')) {
-            Schema::table('role', function (Blueprint $table) {
-                if (!Schema::hasColumn('role', 'role_id')) { $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx'); }
-                if (!Schema::hasColumn('role', 'deleted_at')) { $table->softDeletes(); }
-            });
-            DB::statement("UPDATE `role` SET `role_id` = `id` WHERE `role_id` IS NULL");
-        }
-    }
-    public function down() { /* Down migration is intentionally left empty */ }
-}
-PHP
-  echo "  -> Added compat migration: $COMPAT_MIG"
-fi
-
-TS_FIX2="2020_01_25_000000"
-COMPAT_MIG2="$MIGRATIONS_DIR/${TS_FIX2}_add_role_object_action_and_seed_compat.php"
-if [ ! -f "$COMPAT_MIG2" ]; then
-  cat > "$COMPAT_MIG2" <<'PHP'
-<?php
-use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
-class AddRoleObjectActionAndSeedCompat extends Migration
-{
-    public function up()
-    {
+return new class extends Migration {
+    public function up(): void {
         if (!Schema::hasTable('role')) return;
         Schema::table('role', function (Blueprint $table) {
-            if (!Schema::hasColumn('role', 'object')) { $table->string('object')->nullable()->index('role_object_idx'); }
-            if (!Schema::hasColumn('role', 'action')) { $table->string('action')->nullable()->index('role_action_idx'); }
+            if (!Schema::hasColumn('role','role_id')) {
+                $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx');
+            }
+            if (!Schema::hasColumn('role','deleted_at')) {
+                $table->softDeletes();
+            }
+            if (!Schema::hasColumn('role','object')) {
+                $table->string('object')->nullable()->index('role_object_idx');
+            }
+            if (!Schema::hasColumn('role','action')) {
+                $table->string('action')->nullable()->index('role_action_idx');
+            }
         });
-        $exists = DB::table('role')->whereNull('deleted_at')->where('role_id', 2)->where('object', 'time-intervals')->where('action', 'bulk-edit')->exists();
-        if (!$exists) {
-            DB::table('role')->insert(['role_id' => 2, 'object' => 'time-intervals', 'action' => 'bulk-edit']);
-        }
     }
-    public function down() { /* Down migration is intentionally left empty */ }
-}
+    public function down(): void {
+        if (!Schema::hasTable('role')) return;
+        Schema::table('role', function (Blueprint $table) {
+            if (Schema::hasColumn('role','action'))    { $table->dropIndex('role_action_idx');  $table->dropColumn('action'); }
+            if (Schema::hasColumn('role','object'))    { $table->dropIndex('role_object_idx');  $table->dropColumn('object'); }
+            if (Schema::hasColumn('role','deleted_at')){ $table->dropSoftDeletes(); }
+            if (Schema::hasColumn('role','role_id'))   { $table->dropIndex('role_role_id_idx'); $table->dropColumn('role_id'); }
+        });
+    }
+};
 PHP
-  echo "  -> Added compat migration: $COMPAT_MIG2"
+  echo "  -> Added compat migration: $BOOT_MIG"
 fi
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes

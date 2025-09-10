@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+# Attempt to set pipefail for stricter error handling in pipelines, but allow failure in minimal shells
+(set -o pipefail) 2>/dev/null || true
 
 # --- 1. Locate Laravel Project ---
 # Find the 'artisan' file to locate the project root directory.
@@ -47,6 +49,18 @@ EOF
 fi
 # Ensure the file has Unix line endings
 sed -i 's/\r$//' "$APP_DIR/.env" || true
+
+# Append safe defaults for a serverless environment idempotently
+append_if_missing () {
+  KEY="$1"; VALUE="$2"
+  # Use grep -q to check for the key; if not found (||), append it.
+  grep -q "^${KEY}=" "$APP_DIR/.env" || echo "${KEY}=${VALUE}" >> "$APP_DIR/.env"
+}
+echo "Appending safe defaults for cache, session, and queue drivers..."
+append_if_missing LOG_CHANNEL stderr
+append_if_missing CACHE_DRIVER file
+append_if_missing SESSION_DRIVER file
+append_if_missing QUEUE_CONNECTION sync
 
 # --- 2b. Generate App Key If Missing ---
 if [ -z "${APP_KEY:-}" ] || ! grep -q '^APP_KEY=' "$APP_DIR/.env"; then
@@ -160,7 +174,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role) and add a fallback shim.
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
 echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
 { grep -ril --include='*.php' 'App\\Models\\Rule' "$APP_DIR" 2>/dev/null || true; } \
   | grep -v '/vendor/' | grep -v '/storage/' \
@@ -180,29 +194,90 @@ use Illuminate\Database\Eloquent\Model;
 class Role extends Model { protected $guarded = []; public $timestamps = false; }
 PHP
 fi
-
-# Ensure new Role model is autoloaded by Composer
 if command -v composer >/dev/null 2>&1; then
   echo "Refreshing Composer autoloader..."
   composer dump-autoload -o || true
 fi
 
+# Rule 6: Make the 'add_role_to_users' migration idempotent
+ROLE_MIGRATION_FILE="$MIGRATIONS_DIR/2019_11_29_071129_add_role_to_users.php"
+# 6a: Prefer guarding only the add-column line
+if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
+  sed -i "s/\(\$table->\(unsigned\)\?Integer(['\"]role_id['\"].*\);\)/if (!Schema::hasColumn('users','role_id')) { \1 }/I" "$ROLE_MIGRATION_FILE" || true
+fi
+# 6b: If we still didn't add a guard, fall back to early-return
+if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
+  echo "Could not safely wrap add-column; using early-return guard for 'add_role_to_users' migration."
+  awk '
+    BEGIN { inup=0; injected=0 }
+    /public[[:space:]]+function[[:space:]]+up[[:space:]]*\(/ {
+      inup=1
+      print
+      # If the opening brace is on the same line, inject immediately.
+      if ($0 ~ /{/) {
+        if (!injected) {
+          print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
+          injected=1
+        }
+        inup=0
+      }
+      next
+    }
+    inup && /{/ {
+      print
+      if (!injected) {
+        print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
+        injected=1
+      }
+      inup=0
+      next
+    }
+    { print }
+  ' "$ROLE_MIGRATION_FILE" > "$ROLE_MIGRATION_FILE.tmp" && mv "$ROLE_MIGRATION_FILE.tmp" "$ROLE_MIGRATION_FILE"
+fi
 
 # --- 5. Prepare and Launch Application ---
 : "${PORT:=10000}"
+
+echo "Ensuring writable dirs..."
+mkdir -p storage bootstrap/cache
+chmod -R ug+rwX storage bootstrap/cache || true
+chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
+
 echo "Clearing caches..."
 php artisan config:clear
 php artisan route:clear
 php artisan view:clear
 php artisan cache:clear
 
+echo "Optimizing for production..."
+php artisan optimize || true
+
+run_migrate () {
+  for i in 1 2 3 4 5; do
+    php artisan migrate --force --no-interaction && return 0
+    echo "Migrate attempt $i failed; retrying in 5s..."
+    sleep 5
+  done
+  echo "Migrations failed after retries"; return 1
+}
+
+run_fresh () {
+  for i in 1 2 3 4 5; do
+    php artisan migrate:fresh --seed --force && return 0
+    echo "migrate:fresh attempt $i failed; retrying in 5s..."
+    sleep 5
+  done
+  echo "migrate:fresh failed after retries"; return 1
+}
+
 # Gate destructive migration command behind an environment variable
 if [ "${RESET_DB:-0}" = "1" ]; then
   echo "RESET_DB=1 found. Wiping database and running all migrations from scratch..."
-  php artisan migrate:fresh --seed --force
+  run_fresh
 else
   echo "RESET_DB is not 1. Running incremental migrations..."
-  php artisan migrate --force
+  run_migrate
   # Optionally run seeders on incremental deploys if flag is set
   if [ "${RUN_SEED:-0}" = "1" ]; then
     echo "RUN_SEED=1 found. Running database seeder..."

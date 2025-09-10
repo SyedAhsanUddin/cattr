@@ -168,17 +168,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role)
-echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
-{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
-  | grep -v '/vendor/' | grep -v '/storage/' \
-  | grep -vE '\.skipped$' \
-  | while read -r f; do
-      [ -f "$f" ] || continue
-      echo "  -> Fixing typo in $f"
-      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
-    done
-
+# Rule 5: Create a Role model shim and compatibility shims
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -214,10 +204,6 @@ namespace App\Models;
 class Rule extends Role {}
 PHP
 fi
-if command -v composer >/dev/null 2>&1; then
-  echo "Refreshing Composer autoloader..."
-  composer dump-autoload -o || true
-fi
 
 # Rule 6: Create early compat migration to add role.role_id (+ soft deletes)
 TS_FIX="2020_01_20_000000"
@@ -225,7 +211,6 @@ COMPAT_MIG="$MIGRATIONS_DIR/${TS_FIX}_add_role_roleid_and_softdeletes_compat.php
 if [ ! -f "$COMPAT_MIG" ]; then
   cat > "$COMPAT_MIG" <<'PHP'
 <?php
-
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -242,11 +227,9 @@ return new class extends Migration {
                     $table->softDeletes();
                 }
             });
-            // Backfill role_id from id if needed
             DB::statement("UPDATE `role` SET `role_id` = `id` WHERE `role_id` IS NULL");
         }
     }
-
     public function down(): void
     {
         if (Schema::hasTable('role')) {
@@ -266,6 +249,11 @@ PHP
   echo "  -> Added compat migration: $COMPAT_MIG"
 fi
 
+# FINAL STEP before migrating: Refresh the autoloader to find our new classes
+if command -v composer >/dev/null 2>&1; then
+  echo "Refreshing Composer autoloader to detect new migration files..."
+  composer dump-autoload -o || true
+fi
 
 # --- 5. Prepare and Launch Application ---
 : "${PORT:=10000}"

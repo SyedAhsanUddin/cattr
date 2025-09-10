@@ -22,8 +22,8 @@ if [ -f /etc/secrets/.env ]; then
   cp /etc/secrets/.env "$APP_DIR/.env"
 else
   echo "No secret file found. Building .env from environment variables."
-  # Set default APP_URL if not provided
-  : "${APP_URL:=https://cattr-app.onrender.com}"
+  # Prefer Render's dynamic URL, with a fallback.
+  : "${APP_URL:=${RENDER_EXTERNAL_URL:-https://cattr-app.onrender.com}}"
 
   # Construct the DATABASE_URL for TiDB Serverless, which requires TLS.
   if [ -z "$DATABASE_URL" ]; then
@@ -53,7 +53,6 @@ sed -i 's/\r$//' "$APP_DIR/.env" || true
 # Append safe defaults for a serverless environment idempotently
 append_if_missing () {
   KEY="$1"; VALUE="$2"
-  # Use grep -q to check for the key; if not found (||), append it.
   grep -q "^${KEY}=" "$APP_DIR/.env" || echo "${KEY}=${VALUE}" >> "$APP_DIR/.env"
 }
 echo "Appending safe defaults for cache, session, and queue drivers..."
@@ -201,20 +200,15 @@ fi
 
 # Rule 6: Make the 'add_role_to_users' migration idempotent
 ROLE_MIGRATION_FILE="$MIGRATIONS_DIR/2019_11_29_071129_add_role_to_users.php"
-# 6a: Prefer guarding only the add-column line
-if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
-  sed -i "s/\(\$table->\(unsigned\)\?Integer(['\"]role_id['\"].*\);\)/if (!Schema::hasColumn('users','role_id')) { \1 }/I" "$ROLE_MIGRATION_FILE" || true
-fi
-# 6b: If we still didn't add a guard, fall back to early-return
-if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
-  echo "Could not safely wrap add-column; using early-return guard for 'add_role_to_users' migration."
+if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "Schema::hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
+  echo "Patching 'add_role_to_users' migration to be idempotent (early-return)..."
   awk '
     BEGIN { inup=0; injected=0 }
     /public[[:space:]]+function[[:space:]]+up[[:space:]]*\(/ {
-      inup=1
       print
-      # If the opening brace is on the same line, inject immediately.
-      if ($0 ~ /{/) {
+      inup=1
+      # Handle "brace on same line"
+      if (index($0,"{")) {
         if (!injected) {
           print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
           injected=1
@@ -223,7 +217,7 @@ if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "hasColumn('users','role_id')" "$R
       }
       next
     }
-    inup && /{/ {
+    inup && /\{/ {
       print
       if (!injected) {
         print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
@@ -243,6 +237,7 @@ echo "Ensuring writable dirs..."
 mkdir -p storage bootstrap/cache
 chmod -R ug+rwX storage bootstrap/cache || true
 chown -R www-data:www-data storage bootstrap/cache 2>/dev/null || true
+php artisan storage:link || true
 
 echo "Clearing caches..."
 php artisan config:clear

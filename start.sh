@@ -152,23 +152,54 @@ if [ -n "$ALL_VIEW_MIGS" ]; then
   VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
   cat > "$VIEW_MIG_NEW" <<'PHP'
 <?php
+
 use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Migrations\Migration;
-return new class extends Migration {
-    public function up(): void {
+
+class AddUserLastTimeUsageViewTidb extends Migration
+{
+    public function up()
+    {
         DB::statement('DROP VIEW IF EXISTS user_time_activity');
         DB::statement(<<<'SQL'
-CREATE VIEW user_time_activity AS SELECT ti.id AS time_interval_id, ti.user_id, ti.task_id, ti.end_at AS last_time_activity FROM time_intervals ti JOIN (SELECT user_id, MAX(end_at) AS max_end_at FROM time_intervals GROUP BY user_id) tmax ON ti.user_id = tmax.user_id AND ti.end_at = tmax.max_end_at
+CREATE VIEW user_time_activity AS
+SELECT
+    ti.id AS time_interval_id,
+    ti.user_id,
+    ti.task_id,
+    ti.end_at AS last_time_activity
+FROM time_intervals ti
+JOIN (
+    SELECT user_id, MAX(end_at) AS max_end_at
+    FROM time_intervals
+    GROUP BY user_id
+) tmax
+    ON ti.user_id = tmax.user_id
+   AND ti.end_at = tmax.max_end_at
 SQL
         );
     }
-    public function down(): void { DB::statement('DROP VIEW IF EXISTS user_time_activity'); }
-};
+
+    public function down()
+    {
+        DB::statement('DROP VIEW IF EXISTS user_time_activity');
+    }
+}
 PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Create a Role model shim and compatibility shims
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
+{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
+  | grep -v '/vendor/' | grep -v '/storage/' \
+  | grep -vE '\.skipped$' \
+  | while read -r f; do
+      [ -f "$f" ] || continue
+      echo "  -> Fixing typo in $f"
+      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
+    done
+
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -211,12 +242,15 @@ COMPAT_MIG="$MIGRATIONS_DIR/${TS_FIX}_add_role_roleid_and_softdeletes_compat.php
 if [ ! -f "$COMPAT_MIG" ]; then
   cat > "$COMPAT_MIG" <<'PHP'
 <?php
+
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-return new class extends Migration {
-    public function up(): void
+
+class AddRoleRoleidAndSoftdeletesCompat extends Migration
+{
+    public function up()
     {
         if (Schema::hasTable('role')) {
             Schema::table('role', function (Blueprint $table) {
@@ -230,7 +264,8 @@ return new class extends Migration {
             DB::statement("UPDATE `role` SET `role_id` = `id` WHERE `role_id` IS NULL");
         }
     }
-    public function down(): void
+
+    public function down()
     {
         if (Schema::hasTable('role')) {
             Schema::table('role', function (Blueprint $table) {
@@ -244,7 +279,7 @@ return new class extends Migration {
             });
         }
     }
-};
+}
 PHP
   echo "  -> Added compat migration: $COMPAT_MIG"
 fi

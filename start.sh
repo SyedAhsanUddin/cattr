@@ -87,12 +87,12 @@ MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
   echo "Scanning for incompatible and obsolete migrations..."
 
-  # Rule 1: Skip migrations that use database triggers
-  { grep -rilE 'CREATE[[:space:]]+TRIGGER|DROP[[:space:]]+TRIGGER' "$MIGRATIONS_DIR" 2>/dev/null || true; } \
+  # Rule 1: Skip migrations that use database triggers/procedures/functions (TiDB-incompatible)
+  { grep -rilE 'CREATE[[:space:]]+(TRIGGER|PROCEDURE|FUNCTION)|DROP[[:space:]]+(TRIGGER|PROCEDURE|FUNCTION)' "$MIGRATIONS_DIR" 2>/dev/null || true; } \
   | grep -v '\.skipped$' \
   | while read -r f; do
       [ -f "$f" ] || continue
-      echo "  -> Disabling trigger migration: $f"
+      echo "  -> Disabling trigger/procedure/function migration: $f"
       mv "$f" "$f.skipped"
     done
 
@@ -108,6 +108,7 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
   2020_02_04_080909_fix_user_roles.php
+  2020_07_08_073438_drop_time_durations_cache.php
   "
   echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
@@ -173,7 +174,17 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Create a Role model shim and compatibility shims
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
+{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
+  | grep -v '/vendor/' | grep -v '/storage/' \
+  | grep -vE '\.skipped$' \
+  | while read -r f; do
+      [ -f "$f" ] || continue
+      echo "  -> Fixing typo in $f"
+      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
+    done
+
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"

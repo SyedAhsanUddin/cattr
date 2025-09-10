@@ -1,6 +1,5 @@
 #!/bin/sh
 set -e
-# Attempt to set pipefail for stricter error handling in pipelines, but allow failure in minimal shells
 (set -o pipefail) 2>/dev/null || true
 
 # --- 1. Locate Laravel Project ---
@@ -22,10 +21,8 @@ if [ -f /etc/secrets/.env ]; then
   cp /etc/secrets/.env "$APP_DIR/.env"
 else
   echo "No secret file found. Building .env from environment variables."
-  # Prefer Render's dynamic URL, with a fallback.
   : "${APP_URL:=${RENDER_EXTERNAL_URL:-https://cattr-app.onrender.com}}"
 
-  # Construct the DATABASE_URL for TiDB Serverless, which requires TLS.
   if [ -z "$DATABASE_URL" ]; then
     DATABASE_URL="mysql://${DB_USERNAME}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_DATABASE}?ssl-mode=VERIFY_IDENTITY"
   fi
@@ -47,10 +44,8 @@ DB_PASSWORD=${DB_PASSWORD}
 MYSQL_ATTR_SSL_CA=${MYSQL_ATTR_SSL_CA:-/etc/ssl/certs/ca-certificates.crt}
 EOF
 fi
-# Ensure the file has Unix line endings
 sed -i 's/\r$//' "$APP_DIR/.env" || true
 
-# Append safe defaults for a serverless environment idempotently
 append_if_missing () {
   KEY="$1"; VALUE="$2"
   grep -q "^${KEY}=" "$APP_DIR/.env" || echo "${KEY}=${VALUE}" >> "$APP_DIR/.env"
@@ -68,7 +63,6 @@ if [ -z "${APP_KEY:-}" ] || ! grep -q '^APP_KEY=' "$APP_DIR/.env"; then
 fi
 
 # --- 3. Enforce TLS for Database Connection ---
-# Modify Laravel's database config to use the SSL CA certificate.
 DBCFG="$APP_DIR/config/database.php"
 if [ -f "$DBCFG" ] && ! grep -q "PDO::MYSQL_ATTR_SSL_CA" "$DBCFG"; then
   echo "Patching config/database.php to enforce TLS..."
@@ -173,16 +167,18 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+# Rule 5: Fix bad model reference in migrations (Rule -> Role) + add a safe shim
 echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
-{ grep -ril --include='*.php' 'App\\Models\\Rule' "$APP_DIR" 2>/dev/null || true; } \
+{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
   | grep -v '/vendor/' | grep -v '/storage/' \
   | grep -vE '\.skipped$' \
   | while read -r f; do
+      [ -f "$f" ] || continue
       echo "  -> Fixing typo in $f"
-      sed -i 's#App\\Models\\Rule#App\\Models\\Role#g' "$f"
+      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
     done
 
+# Ensure Role exists
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating minimal App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -191,6 +187,15 @@ if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
 namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 class Role extends Model { protected $guarded = []; public $timestamps = false; }
+PHP
+fi
+# Add a non-invasive shim so legacy references to Rule still work
+if [ ! -f "$APP_DIR/app/Models/Rule.php" ]; then
+  echo "Creating compatibility shim App\\Models\\Rule extends Role..."
+  cat > "$APP_DIR/app/Models/Rule.php" <<'PHP'
+<?php
+namespace App\Models;
+class Rule extends Role {}
 PHP
 fi
 if command -v composer >/dev/null 2>&1; then

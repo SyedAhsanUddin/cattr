@@ -35,17 +35,13 @@ APP_ENV=production
 APP_DEBUG=false
 APP_KEY=${APP_KEY}
 APP_URL=${APP_URL}
-
 DATABASE_URL=${DATABASE_URL}
-
 DB_CONNECTION=mysql
 DB_HOST=${DB_HOST}
 DB_PORT=${DB_PORT}
 DB_DATABASE=${DB_DATABASE}
 DB_USERNAME=${DB_USERNAME}
 DB_PASSWORD=${DB_PASSWORD}
-
-# Path to system CA certificates for TLS verification
 MYSQL_ATTR_SSL_CA=${MYSQL_ATTR_SSL_CA:-/etc/ssl/certs/ca-certificates.crt}
 EOF
 fi
@@ -54,7 +50,6 @@ sed -i 's/\r$//' "$APP_DIR/.env" || true
 
 # --- 3. Enforce TLS for Database Connection ---
 # Modify Laravel's database config to use the SSL CA certificate.
-# This ensures PDO connects to TiDB using the required TLS encryption.
 DBCFG="$APP_DIR/config/database.php"
 if [ -f "$DBCFG" ] && ! grep -q "PDO::MYSQL_ATTR_SSL_CA" "$DBCFG"; then
   echo "Patching config/database.php to enforce TLS..."
@@ -74,7 +69,7 @@ if [ -f "$DBCFG" ] && ! grep -q "PDO::MYSQL_ATTR_SSL_CA" "$DBCFG"; then
   echo "✅ TLS configured."
 fi
 
-# --- 4. Skip Incompatible & Obsolete Migrations ---
+# --- 4a. Skip Incompatible & Obsolete Migrations ---
 MIGRATIONS_DIR="$APP_DIR/database/migrations"
 if [ -d "$MIGRATIONS_DIR" ]; then
   echo "Scanning for incompatible and obsolete migrations..."
@@ -111,8 +106,56 @@ if [ -d "$MIGRATIONS_DIR" ]; then
       mv "$TARGET_FILE" "$TARGET_FILE.skipped"
     fi
   done
-  
   echo "✅ Migration skipping complete."
+fi
+
+# --- 4b. Replace TiDB-incompatible view migration with a compatible one ---
+VIEW_MIG_ORIG="$MIGRATIONS_DIR/2019_03_26_113406_add_user_last_time_usage_view.php"
+if [ -f "$VIEW_MIG_ORIG" ]; then
+  echo "Replacing TiDB-incompatible view migration with a compatible one..."
+  mv "$VIEW_MIG_ORIG" "$VIEW_MIG_ORIG.skipped"
+
+  # Create a new migration that builds the same view without subqueries in ON
+  VIEW_MIG_NEW="$MIGRATIONS_DIR/2019_03_26_113407_add_user_last_time_usage_view_tidb.php"
+  cat > "$VIEW_MIG_NEW" <<'PHP'
+<?php
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Migrations\Migration;
+
+class AddUserLastTimeUsageViewTidb extends Migration
+{
+    public function up()
+    {
+        // Ensure idempotency if re-running
+        DB::statement('DROP VIEW IF EXISTS user_time_activity');
+
+        // TiDB-friendly: use GROUP BY + JOIN instead of subquery in ON()
+        DB::statement(<<<'SQL'
+CREATE VIEW user_time_activity AS
+SELECT
+    ti.id  AS time_interval_id,
+    ti.user_id,
+    ti.task_id,
+    ti.end_at AS last_time_activity
+FROM time_intervals ti
+JOIN (
+    SELECT user_id, MAX(end_at) AS max_end_at
+    FROM time_intervals
+    GROUP BY user_id
+) tmax
+  ON ti.user_id = tmax.user_id
+ AND ti.end_at  = tmax.max_end_at
+SQL
+        );
+    }
+
+    public function down()
+    {
+        DB::statement('DROP VIEW IF EXISTS user_time_activity');
+    }
+}
+PHP
 fi
 
 # --- 5. Prepare and Launch Application ---

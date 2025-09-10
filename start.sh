@@ -1,6 +1,5 @@
 #!/bin/sh
 set -e
-# Attempt to set pipefail for stricter error handling in pipelines, but allow failure in minimal shells
 (set -o pipefail) 2>/dev/null || true
 
 # --- 1. Locate Laravel Project ---
@@ -45,7 +44,6 @@ DB_PASSWORD=${DB_PASSWORD}
 MYSQL_ATTR_SSL_CA=${MYSQL_ATTR_SSL_CA:-/etc/ssl/certs/ca-certificates.crt}
 EOF
 fi
-# Ensure the file has Unix line endings
 sed -i 's/\r$//' "$APP_DIR/.env" || true
 
 append_if_missing () {
@@ -181,7 +179,6 @@ echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
       php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
     done
 
-# Create a strengthened Role model shim if it doesn't exist
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -209,7 +206,6 @@ class Role extends Model
 }
 PHP
 fi
-# Add a non-invasive compatibility shim for Rule -> Role
 if [ ! -f "$APP_DIR/app/Models/Rule.php" ]; then
   echo "Creating compatibility shim App\\Models\\Rule extends Role..."
   cat > "$APP_DIR/app/Models/Rule.php" <<'PHP'
@@ -222,6 +218,54 @@ if command -v composer >/dev/null 2>&1; then
   echo "Refreshing Composer autoloader..."
   composer dump-autoload -o || true
 fi
+
+# Rule 6: Create early compat migration to add role.role_id (+ soft deletes)
+TS_FIX="2020_01_20_000000"
+COMPAT_MIG="$MIGRATIONS_DIR/${TS_FIX}_add_role_roleid_and_softdeletes_compat.php"
+if [ ! -f "$COMPAT_MIG" ]; then
+  cat > "$COMPAT_MIG" <<'PHP'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+return new class extends Migration {
+    public function up(): void
+    {
+        if (Schema::hasTable('role')) {
+            Schema::table('role', function (Blueprint $table) {
+                if (!Schema::hasColumn('role', 'role_id')) {
+                    $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx');
+                }
+                if (!Schema::hasColumn('role', 'deleted_at')) {
+                    $table->softDeletes();
+                }
+            });
+            // Backfill role_id from id if needed
+            DB::statement("UPDATE `role` SET `role_id` = `id` WHERE `role_id` IS NULL");
+        }
+    }
+
+    public function down(): void
+    {
+        if (Schema::hasTable('role')) {
+            Schema::table('role', function (Blueprint $table) {
+                if (Schema::hasColumn('role', 'role_id')) {
+                    $table->dropIndex('role_role_id_idx');
+                    $table->dropColumn('role_id');
+                }
+                if (Schema::hasColumn('role', 'deleted_at')) {
+                    $table->dropSoftDeletes();
+                }
+            });
+        }
+    }
+};
+PHP
+  echo "  -> Added compat migration: $COMPAT_MIG"
+fi
+
 
 # --- 5. Prepare and Launch Application ---
 : "${PORT:=10000}"
@@ -240,36 +284,6 @@ php artisan cache:clear
 
 echo "Optimizing for production..."
 php artisan optimize || true
-
-# Preflight: ensure role.role_id exists for compatibility with old migrations
-echo "Running pre-migration compatibility check for role table..."
-php -r '
-$u = getenv("DB_USERNAME"); $p = getenv("DB_PASSWORD");
-$h = getenv("DB_HOST") ?: "127.0.0.1"; $port = getenv("DB_PORT") ?: "3306";
-$db = getenv("DB_DATABASE"); if (!$db) { exit; }
-$dsn = "mysql:host=$h;port=$port;dbname=$db;charset=utf8mb4";
-try {
-  $pdo = new PDO($dsn, $u, $p, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
-  $hasRole = $pdo->query("SHOW TABLES LIKE '\''role'\''")->fetch();
-  if ($hasRole) {
-    $hasRoleId = $pdo->query("SHOW COLUMNS FROM `role` LIKE '\''role_id'\''")->fetch();
-    if (!$hasRoleId) {
-      $hasId = $pdo->query("SHOW COLUMNS FROM `role` LIKE '\''id'\''")->fetch();
-      if ($hasId) {
-        echo "Adding compatibility column '\''role.role_id'\''...\n";
-        $pdo->exec("ALTER TABLE `role` ADD COLUMN `role_id` INT");
-        $pdo->exec("UPDATE `role` SET `role_id` = `id`");
-      }
-    }
-    $idx = $pdo->query("SHOW INDEX FROM `role` WHERE Key_name='\''role_role_id_idx'\''")->fetch();
-    if (!$idx) {
-      $pdo->exec("CREATE INDEX `role_role_id_idx` ON `role`(`role_id`)");
-    }
-  }
-} catch (Throwable $e) {
-  // non-fatal; migration step will surface real issues
-}
-'
 
 run_migrate () {
   for i in 1 2 3 4 5; do

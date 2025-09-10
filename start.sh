@@ -107,6 +107,7 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   OBSOLETE_MIGRATIONS="
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
+  2020_02_04_080909_fix_user_roles.php
   "
   echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
@@ -172,17 +173,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role) and add shims
-echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
-{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
-  | grep -v '/vendor/' | grep -v '/storage/' \
-  | grep -vE '\.skipped$' \
-  | while read -r f; do
-      [ -f "$f" ] || continue
-      echo "  -> Fixing typo in $f"
-      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
-    done
-
+# Rule 5: Create a Role model shim and compatibility shims
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -219,7 +210,7 @@ class Rule extends Role {}
 PHP
 fi
 
-# Rule 6: Bootstrap role table BEFORE legacy role migrations run
+# Rule 6: Bootstrap role table BEFORE legacy migrations run
 TS_BOOT="2020_01_05_000000"
 BOOT_MIG="$MIGRATIONS_DIR/${TS_BOOT}_bootstrap_roles_table_compat.php"
 if [ ! -f "$BOOT_MIG" ]; then
@@ -228,8 +219,10 @@ if [ ! -f "$BOOT_MIG" ]; then
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-return new class extends Migration {
-    public function up(): void {
+class BootstrapRolesTableCompat extends Migration
+{
+    public function up()
+    {
         if (!Schema::hasTable('role')) return;
         Schema::table('role', function (Blueprint $table) {
             if (!Schema::hasColumn('role','role_id')) {
@@ -246,16 +239,8 @@ return new class extends Migration {
             }
         });
     }
-    public function down(): void {
-        if (!Schema::hasTable('role')) return;
-        Schema::table('role', function (Blueprint $table) {
-            if (Schema::hasColumn('role','action'))    { $table->dropIndex('role_action_idx');  $table->dropColumn('action'); }
-            if (Schema::hasColumn('role','object'))    { $table->dropIndex('role_object_idx');  $table->dropColumn('object'); }
-            if (Schema::hasColumn('role','deleted_at')){ $table->dropSoftDeletes(); }
-            if (Schema::hasColumn('role','role_id'))   { $table->dropIndex('role_role_id_idx'); $table->dropColumn('role_id'); }
-        });
-    }
-};
+    public function down() { /* Down migration intentionally left empty */ }
+}
 PHP
   echo "  -> Added compat migration: $BOOT_MIG"
 fi

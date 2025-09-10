@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+# Attempt to set pipefail for stricter error handling in pipelines, but allow failure in minimal shells
 (set -o pipefail) 2>/dev/null || true
 
 # --- 1. Locate Laravel Project ---
@@ -44,6 +45,7 @@ DB_PASSWORD=${DB_PASSWORD}
 MYSQL_ATTR_SSL_CA=${MYSQL_ATTR_SSL_CA:-/etc/ssl/certs/ca-certificates.crt}
 EOF
 fi
+# Ensure the file has Unix line endings
 sed -i 's/\r$//' "$APP_DIR/.env" || true
 
 append_if_missing () {
@@ -107,6 +109,7 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   OBSOLETE_MIGRATIONS="
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
+  2020_01_14_061358_fixes_for_roles.php
   "
   echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
@@ -167,7 +170,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role) + add a safe shim
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
 echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
 { grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
   | grep -v '/vendor/' | grep -v '/storage/' \
@@ -178,18 +181,35 @@ echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
       php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
     done
 
-# Ensure Role exists
+# Create a strengthened Role model shim if it doesn't exist
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
-  echo "Creating minimal App\\Models\\Role model (not found)..."
+  echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
   cat > "$APP_DIR/app/Models/Role.php" <<'PHP'
 <?php
 namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
-class Role extends Model { protected $guarded = []; public $timestamps = false; }
+use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Schema;
+class Role extends Model
+{
+    use SoftDeletes;
+    protected $table = 'role';
+    public $timestamps = false;
+    protected $guarded = [];
+    public function getKeyName()
+    {
+        try {
+            if (Schema::hasColumn($this->getTable(), 'role_id')) {
+                return 'role_id';
+            }
+        } catch (\Throwable $e) {}
+        return 'id';
+    }
+}
 PHP
 fi
-# Add a non-invasive shim so legacy references to Rule still work
+# Add a non-invasive compatibility shim for Rule -> Role
 if [ ! -f "$APP_DIR/app/Models/Rule.php" ]; then
   echo "Creating compatibility shim App\\Models\\Rule extends Role..."
   cat > "$APP_DIR/app/Models/Rule.php" <<'PHP'
@@ -201,38 +221,6 @@ fi
 if command -v composer >/dev/null 2>&1; then
   echo "Refreshing Composer autoloader..."
   composer dump-autoload -o || true
-fi
-
-# Rule 6: Make the 'add_role_to_users' migration idempotent
-ROLE_MIGRATION_FILE="$MIGRATIONS_DIR/2019_11_29_071129_add_role_to_users.php"
-if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "Schema::hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
-  echo "Patching 'add_role_to_users' migration to be idempotent (early-return)..."
-  awk '
-    BEGIN { inup=0; injected=0 }
-    /public[[:space:]]+function[[:space:]]+up[[:space:]]*\(/ {
-      print
-      inup=1
-      # Handle "brace on same line"
-      if (index($0,"{")) {
-        if (!injected) {
-          print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
-          injected=1
-        }
-        inup=0
-      }
-      next
-    }
-    inup && /\{/ {
-      print
-      if (!injected) {
-        print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
-        injected=1
-      }
-      inup=0
-      next
-    }
-    { print }
-  ' "$ROLE_MIGRATION_FILE" > "$ROLE_MIGRATION_FILE.tmp" && mv "$ROLE_MIGRATION_FILE.tmp" "$ROLE_MIGRATION_FILE"
 fi
 
 # --- 5. Prepare and Launch Application ---
@@ -252,6 +240,36 @@ php artisan cache:clear
 
 echo "Optimizing for production..."
 php artisan optimize || true
+
+# Preflight: ensure role.role_id exists for compatibility with old migrations
+echo "Running pre-migration compatibility check for role table..."
+php -r '
+$u = getenv("DB_USERNAME"); $p = getenv("DB_PASSWORD");
+$h = getenv("DB_HOST") ?: "127.0.0.1"; $port = getenv("DB_PORT") ?: "3306";
+$db = getenv("DB_DATABASE"); if (!$db) { exit; }
+$dsn = "mysql:host=$h;port=$port;dbname=$db;charset=utf8mb4";
+try {
+  $pdo = new PDO($dsn, $u, $p, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+  $hasRole = $pdo->query("SHOW TABLES LIKE '\''role'\''")->fetch();
+  if ($hasRole) {
+    $hasRoleId = $pdo->query("SHOW COLUMNS FROM `role` LIKE '\''role_id'\''")->fetch();
+    if (!$hasRoleId) {
+      $hasId = $pdo->query("SHOW COLUMNS FROM `role` LIKE '\''id'\''")->fetch();
+      if ($hasId) {
+        echo "Adding compatibility column '\''role.role_id'\''...\n";
+        $pdo->exec("ALTER TABLE `role` ADD COLUMN `role_id` INT");
+        $pdo->exec("UPDATE `role` SET `role_id` = `id`");
+      }
+    }
+    $idx = $pdo->query("SHOW INDEX FROM `role` WHERE Key_name='\''role_role_id_idx'\''")->fetch();
+    if (!$idx) {
+      $pdo->exec("CREATE INDEX `role_role_id_idx` ON `role`(`role_id`)");
+    }
+  }
+} catch (Throwable $e) {
+  // non-fatal; migration step will surface real issues
+}
+'
 
 run_migrate () {
   for i in 1 2 3 4 5; do

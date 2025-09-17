@@ -174,7 +174,17 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Create Role model shims to fix legacy code
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
+{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
+  | grep -v '/vendor/' | grep -v '/storage/' \
+  | grep -vE '\.skipped$' \
+  | while read -r f; do
+      [ -f "$f" ] || continue
+      echo "  -> Fixing typo in $f"
+      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
+    done
+
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -250,7 +260,6 @@ fi
 API_ROUTES_FILE="$APP_DIR/routes/api.php"
 if [ -f "$API_ROUTES_FILE" ]; then
     echo "Patching routes/api.php to remove conflicting catch-all route..."
-    # Use grep -v to filter out the problematic line. This is more robust than a complex sed regex.
     grep -v "universalRoute" "$API_ROUTES_FILE" > "$API_ROUTES_FILE.tmp" && mv "$API_ROUTES_FILE.tmp" "$API_ROUTES_FILE"
 fi
 

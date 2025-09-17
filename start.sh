@@ -126,9 +126,9 @@ ALL_VIEW_MIGS="$(
       -iname '*user_time_activity*.php' -o \
       -iname '*user*last*time*usage*view*.php' -o \
       -iname '2019_03_26_113406_add_user_last_time_usage_view.php' \
-    \) -print 2>/dev/null
-    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
-    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
+    \) -print 2>/dev/null;
+    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
+    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
   } | sort -u
 )"
 ALL_VIEW_MIGS="$(printf "%s\n" "$ALL_VIEW_MIGS" | grep -vE '\.skipped$|_tidb\.php$' || true)"
@@ -327,3 +327,4 @@ fi
 
 echo "🚀 Starting Cattr application server..."
 php artisan serve --host 0.0.0.0 --port "$PORT"
+

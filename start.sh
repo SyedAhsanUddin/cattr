@@ -126,9 +126,9 @@ ALL_VIEW_MIGS="$(
       -iname '*user_time_activity*.php' -o \
       -iname '*user*last*time*usage*view*.php' -o \
       -iname '2019_03_26_113406_add_user_last_time_usage_view.php' \
-    \) -print 2>/dev/null;
-    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
-    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
+    \) -print 2>/dev/null
+    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
+    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
   } | sort -u
 )"
 ALL_VIEW_MIGS="$(printf "%s\n" "$ALL_VIEW_MIGS" | grep -vE '\.skipped$|_tidb\.php$' || true)"
@@ -242,6 +242,32 @@ class BootstrapRolesTableCompat extends Migration
 PHP
   echo "  -> Added compat migration: $BOOT_MIG"
 fi
+
+# Rule 7: Add probe endpoints & Loosen CORS for desktop client
+echo "Adding API probe endpoints for client verification..."
+cat >> routes/web.php <<'PHP'
+Route::get('/', function () {
+    return response()->json(['ok' => true, 'product' => 'cattr', 'api' => url('/api'), 'time' => now()->toDateTimeString()]);
+});
+PHP
+cat >> routes/api.php <<'PHP'
+Route::get('/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
+Route::get('/v1/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
+Route::get('/health', function () { return response()->json(['status' => 'ok']); });
+PHP
+
+echo "Loosening CORS for desktop client compatibility..."
+php -r '
+$f="config/cors.php";
+if (file_exists($f)) {
+    $c=file_get_contents($f);
+    $c=preg_replace("/(\'paths\'\s*=>\s*)\[[^\]]*\]/", "$1[\"api/*\", \"/\"]", $c);
+    $c=preg_replace("/(\'allowed_origins\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    $c=preg_replace("/(\'allowed_headers\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    $c=preg_replace("/(\'allowed_methods\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    file_put_contents($f,$c);
+}
+'
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes
 if command -v composer >/dev/null 2>&1; then

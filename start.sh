@@ -126,9 +126,9 @@ ALL_VIEW_MIGS="$(
       -iname '*user_time_activity*.php' -o \
       -iname '*user*last*time*usage*view*.php' -o \
       -iname '2019_03_26_113406_add_user_last_time_usage_view.php' \
-    \) -print 2>/dev/null
-    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
-    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/'
+    \) -print 2>/dev/null;
+    { grep -rilE 'CREATE([[:space:]]+OR[[:space:]]+REPLACE)?[[:space:]]+VIEW[[:space:]]+`?user_time_activity`?|user_time_activity' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
+    { grep -rilE 'AddUserLastTimeUsageView' "$APP_DIR" 2>/dev/null || true; } | grep -v '/vendor/' | grep -v '/storage/';
   } | sort -u
 )"
 ALL_VIEW_MIGS="$(printf "%s\n" "$ALL_VIEW_MIGS" | grep -vE '\.skipped$|_tidb\.php$' || true)"
@@ -170,8 +170,44 @@ SQL
 PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
+  done
 
-# Rule 5: Create Role model shims to fix legacy code
+  TS="$(date +%Y_%m_%d_%H%M%S)"
+  VIEW_MIG_NEW="$MIGRATIONS_DIR/${TS}_add_user_last_time_usage_view_tidb.php"
+  cat > "$VIEW_MIG_NEW" <<'PHP'
+<?php
+use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Migrations\Migration;
+class AddUserLastTimeUsageViewTidb extends Migration
+{
+    public function up()
+    {
+        DB::statement('DROP VIEW IF EXISTS user_time_activity');
+        DB::statement(<<<'SQL'
+CREATE VIEW user_time_activity AS SELECT ti.id AS time_interval_id, ti.user_id, ti.task_id, ti.end_at AS last_time_activity FROM time_intervals ti JOIN (SELECT user_id, MAX(end_at) AS max_end_at FROM time_intervals GROUP BY user_id) tmax ON ti.user_id = tmax.user_id AND ti.end_at = tmax.max_end_at
+SQL
+        );
+    }
+    public function down()
+    {
+        DB::statement('DROP VIEW IF EXISTS user_time_activity');
+    }
+}
+PHP
+  echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
+fi
+
+# Rule 5: Fix bad model reference in migrations (Rule -> Role)
+echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
+{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
+  | grep -v '/vendor/' | grep -v '/storage/' \
+  | grep -vE '\.skipped$' \
+  | while read -r f; do
+      [ -f "$f" ] || continue
+      echo "  -> Fixing typo in $f"
+      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
+    done
+
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -243,39 +279,6 @@ PHP
   echo "  -> Added compat migration: $BOOT_MIG"
 fi
 
-# Rule 7: Disable conflicting API catch-all route to allow web UI to load
-API_ROUTES_FILE="$APP_DIR/routes/api.php"
-if [ -f "$API_ROUTES_FILE" ]; then
-    echo "Patching routes/api.php to remove conflicting catch-all route..."
-    grep -v "universalRoute" "$API_ROUTES_FILE" > "$API_ROUTES_FILE.tmp" && mv "$API_ROUTES_FILE.tmp" "$API_ROUTES_FILE"
-fi
-
-# Rule 8: Add probe endpoints & Loosen CORS for desktop client
-echo "Adding API probe endpoints for client verification..."
-cat >> routes/web.php <<'PHP'
-Route::get('/', function () {
-    return response()->json(['ok' => true, 'product' => 'cattr', 'api' => url('/api'), 'time' => now()->toDateTimeString()]);
-});
-PHP
-cat >> routes/api.php <<'PHP'
-Route::get('/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
-Route::get('/v1/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
-Route::get('/health', function () { return response()->json(['status' => 'ok']); });
-PHP
-
-echo "Loosening CORS for desktop client compatibility..."
-php -r '
-$f="config/cors.php";
-if (file_exists($f)) {
-    $c=file_get_contents($f);
-    $c=preg_replace("/(\'paths\'\s*=>\s*)\[[^\]]*\]/", "$1[\"api/*\", \"/\"]", $c);
-    $c=preg_replace("/(\'allowed_origins\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
-    $c=preg_replace("/(\'allowed_headers\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
-    $c=preg_replace("/(\'allowed_methods\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
-    file_put_contents($f,$c);
-}
-'
-
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes
 if command -v composer >/dev/null 2>&1; then
   echo "Refreshing Composer autoloader to detect new migration files..."
@@ -334,3 +337,4 @@ fi
 
 echo "🚀 Starting Cattr application server..."
 php artisan serve --host 0.0.0.0 --port "$PORT"
+

@@ -171,17 +171,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role) and add shims
-echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
-{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
-  | grep -v '/vendor/' | grep -v '/storage/' \
-  | grep -vE '\.skipped$' \
-  | while read -r f; do
-      [ -f "$f" ] || continue
-      echo "  -> Fixing typo in $f"
-      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
-    done
-
+# Rule 5: Create Role model shims to fix legacy code
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -253,37 +243,38 @@ PHP
   echo "  -> Added compat migration: $BOOT_MIG"
 fi
 
-# Rule 7: Make the 'add_role_to_users' migration idempotent
-ROLE_MIGRATION_FILE="$MIGRATIONS_DIR/2019_11_29_071129_add_role_to_users.php"
-if [ -f "$ROLE_MIGRATION_FILE" ] && ! grep -q "Schema::hasColumn('users','role_id')" "$ROLE_MIGRATION_FILE"; then
-  echo "Patching 'add_role_to_users' migration to be idempotent (early-return)..."
-  awk '
-    BEGIN { inup=0; injected=0 }
-    /public[[:space:]]+function[[:space:]]+up[[:space:]]*\(/ {
-      print
-      inup=1
-      # Handle "brace on same line"
-      if (index($0,"{")) {
-        if (!injected) {
-          print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
-          injected=1
-        }
-        inup=0
-      }
-      next
-    }
-    inup && /\{/ {
-      print
-      if (!injected) {
-        print "        if (\\Illuminate\\Support\\Facades\\Schema::hasColumn('\''users'\'','\''role_id'\'')) { return; }"
-        injected=1
-      }
-      inup=0
-      next
-    }
-    { print }
-  ' "$ROLE_MIGRATION_FILE" > "$ROLE_MIGRATION_FILE.tmp" && mv "$ROLE_MIGRATION_FILE.tmp" "$ROLE_MIGRATION_FILE"
+# Rule 7: Disable conflicting API catch-all route to allow web UI to load
+API_ROUTES_FILE="$APP_DIR/routes/api.php"
+if [ -f "$API_ROUTES_FILE" ]; then
+    echo "Patching routes/api.php to remove conflicting catch-all route..."
+    grep -v "universalRoute" "$API_ROUTES_FILE" > "$API_ROUTES_FILE.tmp" && mv "$API_ROUTES_FILE.tmp" "$API_ROUTES_FILE"
 fi
+
+# Rule 8: Add probe endpoints & Loosen CORS for desktop client
+echo "Adding API probe endpoints for client verification..."
+cat >> routes/web.php <<'PHP'
+Route::get('/', function () {
+    return response()->json(['ok' => true, 'product' => 'cattr', 'api' => url('/api'), 'time' => now()->toDateTimeString()]);
+});
+PHP
+cat >> routes/api.php <<'PHP'
+Route::get('/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
+Route::get('/v1/ping', function () { return response()->json(['ok' => true, 'product' => 'cattr']); });
+Route::get('/health', function () { return response()->json(['status' => 'ok']); });
+PHP
+
+echo "Loosening CORS for desktop client compatibility..."
+php -r '
+$f="config/cors.php";
+if (file_exists($f)) {
+    $c=file_get_contents($f);
+    $c=preg_replace("/(\'paths\'\s*=>\s*)\[[^\]]*\]/", "$1[\"api/*\", \"/\"]", $c);
+    $c=preg_replace("/(\'allowed_origins\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    $c=preg_replace("/(\'allowed_headers\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    $c=preg_replace("/(\'allowed_methods\'\s*=>\s*)\[[^\]]*\]/", "$1[\"*\"]", $c);
+    file_put_contents($f,$c);
+}
+'
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes
 if command -v composer >/dev/null 2>&1; then

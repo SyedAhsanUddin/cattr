@@ -92,7 +92,7 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   | grep -v '\.skipped$' \
   | while read -r f; do
       [ -f "$f" ] || continue
-      echo "  -> Disabling trigger/procedure/function migration: $f"
+      echo "  -> Disabling unsupported migration (trigger/procedure): $f"
       mv "$f" "$f.skipped"
     done
 
@@ -107,8 +107,8 @@ if [ -d "$MIGRATIONS_DIR" ]; then
   OBSOLETE_MIGRATIONS="
   2018_09_27_100017_update_rules.php
   2018_11_02_121027_create_registrations_table.php
+  2020_01_14_061358_fixes_for_roles.php
   2020_02_04_080909_fix_user_roles.php
-  2020_07_08_073438_drop_time_durations_cache.php
   "
   echo "Disabling obsolete migrations:"
   echo "$OBSOLETE_MIGRATIONS" | while read -r migration_file; do
@@ -174,17 +174,7 @@ PHP
   echo "  -> Added compatible replacement: $VIEW_MIG_NEW"
 fi
 
-# Rule 5: Fix bad model reference in migrations (Rule -> Role)
-echo "Patching migrations that reference App\\Models\\Rule (typo) ..."
-{ grep -rilF --include='*.php' 'App\Models\Rule' "$APP_DIR" 2>/dev/null || true; } \
-  | grep -v '/vendor/' | grep -v '/storage/' \
-  | grep -vE '\.skipped$' \
-  | while read -r f; do
-      [ -f "$f" ] || continue
-      echo "  -> Fixing typo in $f"
-      php -r "\$p='$f'; \$c=file_get_contents(\$p); \$c=str_replace('App\\\\Models\\\\Rule','App\\\\Models\\\\Role', \$c); file_put_contents(\$p,\$c);"
-    done
-
+# Rule 5: Create Role model shims to fix legacy code
 if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
   echo "Creating strengthened App\\Models\\Role model (not found)..."
   mkdir -p "$APP_DIR/app/Models"
@@ -254,6 +244,14 @@ class BootstrapRolesTableCompat extends Migration
 }
 PHP
   echo "  -> Added compat migration: $BOOT_MIG"
+fi
+
+# Rule 7: Disable conflicting API catch-all route to allow web UI to load
+API_ROUTES_FILE="$APP_DIR/routes/api.php"
+if [ -f "$API_ROUTES_FILE" ]; then
+    echo "Patching routes/api.php to disable conflicting catch-all route..."
+    # Comment out the Route::any('(.*)', ...) line
+    sed -i "s/Route::any('(.*)', 'Controller@universalRoute');/\/\/ Route::any('(.*)', 'Controller@universalRoute');/" "$API_ROUTES_FILE"
 fi
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes

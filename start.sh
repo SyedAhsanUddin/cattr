@@ -249,9 +249,9 @@ fi
 # Rule 7: Disable conflicting API catch-all route to allow web UI to load
 API_ROUTES_FILE="$APP_DIR/routes/api.php"
 if [ -f "$API_ROUTES_FILE" ]; then
-    echo "Patching routes/api.php to disable conflicting catch-all route..."
-    # Comment out the Route::any('(.*)', ...) line
-    sed -i "s/Route::any('(.*)', 'Controller@universalRoute');/\/\/ Route::any('(.*)', 'Controller@universalRoute');/" "$API_ROUTES_FILE"
+    echo "Patching routes/api.php to remove conflicting catch-all route..."
+    # Use grep -v to filter out the problematic line. This is more robust than a complex sed regex.
+    grep -v "universalRoute" "$API_ROUTES_FILE" > "$API_ROUTES_FILE.tmp" && mv "$API_ROUTES_FILE.tmp" "$API_ROUTES_FILE"
 fi
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes

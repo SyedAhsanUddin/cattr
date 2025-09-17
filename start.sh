@@ -270,7 +270,7 @@ if command -v composer >/dev/null 2>&1; then
 fi
 
 # --- 5. Prepare and Launch Application ---
-: "${PORT:=10000}"
+: "${PORT:=4000}"
 
 echo "Ensuring writable dirs..."
 mkdir -p storage bootstrap/cache
@@ -321,3 +321,4 @@ fi
 
 echo "🚀 Starting Cattr application server..."
 php artisan serve --host 0.0.0.0 --port "$PORT"
+

@@ -172,10 +172,76 @@ PHP
 fi
 
 # Rule 5: Create Role model shims to fix legacy code
-# ... (This section is unchanged and has been omitted for brevity)
+if [ ! -f "$APP_DIR/app/Models/Role.php" ]; then
+  echo "Creating strengthened App\\Models\\Role model (not found)..."
+  mkdir -p "$APP_DIR/app/Models"
+  cat > "$APP_DIR/app/Models/Role.php" <<'PHP'
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Schema;
+class Role extends Model
+{
+    use SoftDeletes;
+    protected $table = 'role';
+    public $timestamps = false;
+    protected $guarded = [];
+    public function getKeyName()
+    {
+        try {
+            if (Schema::hasColumn($this->getTable(), 'role_id')) {
+                return 'role_id';
+            }
+        } catch (\Throwable $e) {}
+        return 'id';
+    }
+}
+PHP
+fi
+if [ ! -f "$APP_DIR/app/Models/Rule.php" ]; then
+  echo "Creating compatibility shim App\\Models\\Rule extends Role..."
+  cat > "$APP_DIR/app/Models/Rule.php" <<'PHP'
+<?php
+namespace App\Models;
+class Rule extends Role {}
+PHP
+fi
 
 # Rule 6: Bootstrap role table BEFORE legacy migrations run
-# ... (This section is unchanged and has been omitted for brevity)
+TS_BOOT="2020_01_05_000000"
+BOOT_MIG="$MIGRATIONS_DIR/${TS_BOOT}_bootstrap_roles_table_compat.php"
+if [ ! -f "$BOOT_MIG" ]; then
+  cat > "$BOOT_MIG" <<'PHP'
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+class BootstrapRolesTableCompat extends Migration
+{
+    public function up()
+    {
+        if (!Schema::hasTable('role')) return;
+        Schema::table('role', function (Blueprint $table) {
+            if (!Schema::hasColumn('role','role_id')) {
+                $table->unsignedInteger('role_id')->nullable()->index('role_role_id_idx');
+            }
+            if (!Schema::hasColumn('role','deleted_at')) {
+                $table->softDeletes();
+            }
+            if (!Schema::hasColumn('role','object')) {
+                $table->string('object')->nullable()->index('role_object_idx');
+            }
+            if (!Schema::hasColumn('role','action')) {
+                $table->string('action')->nullable()->index('role_action_idx');
+            }
+        });
+    }
+    public function down() { /* Down migration intentionally left empty */ }
+}
+PHP
+  echo "  -> Added compat migration: $BOOT_MIG"
+fi
 
 # FINAL STEP before migrating: Refresh the autoloader to find our new classes
 if command -v composer >/dev/null 2>&1; then
